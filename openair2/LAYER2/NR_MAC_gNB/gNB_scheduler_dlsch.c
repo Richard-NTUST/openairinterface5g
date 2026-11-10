@@ -18,6 +18,7 @@
 
 /*Softmodem params*/
 #include "executables/softmodem-common.h"
+#include <stdlib.h>
 #include "../../../nfapi/oai_integration/vendor_ext.h"
 
 ////////////////////////////////////////////////////////
@@ -1206,6 +1207,36 @@ static void fill_dl_tx_request(post_process_pdsch_t *pdsch,
   pdsch->TX_req->Slot = slot;
 }
 
+/* Per-allocation scheduler telemetry for O-RU power measurement.
+ * post_process_dlsch() is the common endpoint of the generic and the phy-test
+ * DL scheduling paths, so one hook covers both. Controlled by env
+ * WINLAB_SCHED_TELEMETRY (exact lowercase): "off", "sampled" (default: only
+ * frames where frame % 100 == 0), "full" (every allocation). The line format
+ * must stay in sync with the parser in slot_rb_plot.py. */
+typedef enum { SCHED_TELEM_OFF, SCHED_TELEM_SAMPLED, SCHED_TELEM_FULL } sched_telem_mode_t;
+
+static sched_telem_mode_t sched_telemetry_mode(void)
+{
+  static sched_telem_mode_t mode = SCHED_TELEM_SAMPLED;
+  static bool init = false;
+  if (!init) {
+    const char *env = getenv("WINLAB_SCHED_TELEMETRY");
+    if (env && strcmp(env, "off") == 0)
+      mode = SCHED_TELEM_OFF;
+    else if (env && strcmp(env, "full") == 0)
+      mode = SCHED_TELEM_FULL;
+    else
+      mode = SCHED_TELEM_SAMPLED;
+    const char *name[] = {"off", "sampled", "full"};
+    LOG_I(NR_MAC,
+          "[WINLAB_SCHED_CONFIG] telemetry=%s source=%s\n",
+          name[mode],
+          get_softmodem_params()->phy_test ? "phytest" : "generic");
+    init = true;
+  }
+  return mode;
+}
+
 void post_process_dlsch(gNB_MAC_INST *nr_mac,
                         nr_cell_sched_t *cell,
                         post_process_pdsch_t *pdsch,
@@ -1259,6 +1290,28 @@ void post_process_dlsch(gNB_MAC_INST *nr_mac,
         sched_pdsch->pucch_allocation,
         tpc);
   DevAssert(sched_pdsch->rbSize > 0);
+
+  const sched_telem_mode_t telem = sched_telemetry_mode();
+  if (telem == SCHED_TELEM_FULL || (telem == SCHED_TELEM_SAMPLED && frame % 100 == 0)) {
+    LOG_I(NR_MAC,
+          "[WINLAB_SCHED_LOG] mode=%s frame=%d slot=%d rnti=%04x is_retx=%d control_only=0 rbStart=%d rbSize=%d mcs=%d "
+          "tbs=%u layers=%d harq_pid=%d beam=%d tda=%d sym=%d:%d\n",
+          get_softmodem_params()->phy_test ? "phytest" : "generic",
+          frame,
+          slot,
+          rnti,
+          harq->round > 0 ? 1 : 0,
+          sched_pdsch->rbStart,
+          sched_pdsch->rbSize,
+          sched_pdsch->mcs,
+          TBS,
+          nrOfLayers,
+          current_harq_pid,
+          UE->UE_beam_index,
+          sched_pdsch->time_domain_allocation,
+          tda_info->startSymbolIndex,
+          tda_info->nrOfSymbols);
+  }
 
   DevAssert(nrOfLayers >= 1 && nrOfLayers <= NR_KPM_MAX_LAYERS);
   DevAssert(current_BWP->mcsTableIdx >= 0 && current_BWP->mcsTableIdx < NR_KPM_NB_MCS_TABLE_DL);
